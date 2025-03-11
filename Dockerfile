@@ -1,4 +1,4 @@
-ARG ALPINE_VERSION
+ARG ALPINE_VERSION=3.18
 FROM golang:alpine as builder
 
 ENV CGO_ENABLED=0
@@ -7,14 +7,59 @@ ENV GOPATH=/go
 ENV GOBIN=/go/bin
 
 COPY xteve-repo/ /source
-
 WORKDIR /source
 
-RUN apk add --no-cache git 
-
-RUN go get ./... &&\
+# Install Go dependencies
+RUN apk add --no-cache git && \
+    go get ./... && \
     go build -o /xteve xteve.go
 
+# ==============================
+# FFmpeg Build Stage
+# ==============================
+FROM alpine:${ALPINE_VERSION} as ffmpeg-builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    build-base \
+    coreutils \
+    nasm \
+    yasm \
+    pkgconfig \
+    linux-headers \
+    curl \
+    x264-dev \
+    x265-dev \
+    libvpx-dev \
+    libvorbis-dev \
+    opus-dev \
+    mesa-dev
+
+# Install CUDA/NVENC headers
+RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
+    cd nv-codec-headers && \
+    make && make install
+
+# Build FFmpeg with NVENC support
+RUN git clone https://git.ffmpeg.org/ffmpeg.git && \
+    cd ffmpeg && \
+    ./configure \
+      --enable-gpl \
+      --enable-nonfree \
+      --enable-libx264 \
+      --enable-libx265 \
+      --enable-libvpx \
+      --enable-libvorbis \
+      --enable-libopus \
+      --enable-cuda \
+      --enable-cuvid \
+      --enable-nvenc && \
+    make -j$(nproc) && \
+    make install
+
+# ==============================
+# Final Stage
+# ==============================
 FROM alpine:${ALPINE_VERSION}
 
 ARG XTEVE_VERSION
@@ -33,16 +78,18 @@ LABEL org.label-schema.build-date="${BUILD_TIME}" \
     docker-build.ci-url="${BUILD_CI_URL}" \
     maintainer="tom@whi.tw"
 
+# Install runtime dependencies
 RUN apk add --no-cache \
     ca-certificates \
     tzdata \
-    ffmpeg \
-    vlc \
-    && update-ca-certificates
+    vlc && \
+    update-ca-certificates
+
+# Copy built FFmpeg and xTeVe
+COPY --from=builder /xteve /xteve
+COPY --from=ffmpeg-builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 
 WORKDIR /xteve
-COPY --from=builder /xteve xteve
-
 VOLUME ["/config", "/tmp/xteve"]
 
 EXPOSE 34400
